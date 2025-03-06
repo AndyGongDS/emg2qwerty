@@ -25,11 +25,9 @@ from emg2qwerty.modules import (
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
     TDSConvEncoder,
-    Conformer,
-    PermuteLayer
 )
 from emg2qwerty.transforms import Transform
-from torch.nn import functional as F
+from emg2qwerty.modules_trans import *
 
 
 class WindowedEMGDataModule(pl.LightningDataModule):
@@ -92,9 +90,9 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                 WindowedEMGDataset(
                     hdf5_path,
                     transform=self.test_transform,
-                    window_length=self.window_length,
                     # Feed the entire session at once without windowing/padding
                     # at test time for more realism
+                    window_length=None,
                     padding=(0, 0),
                     jitter=False,
                 )
@@ -179,10 +177,10 @@ class TDSConvCTCModule(pl.LightningModule):
             ),
             PermuteLayer(),
             # (N, T, num_features)
-            Conformer(emb_size=768, 
-                      depth=2, 
+            Conformer(emb_size=512, 
+                      depth=6, 
                       n_classes=charset().num_classes, 
-                      dropout=0.2,
+                      dropout=0.1, 
                       max_len=5000),
             # (T, N, num_classes)
             nn.LogSoftmax(dim=-1),
