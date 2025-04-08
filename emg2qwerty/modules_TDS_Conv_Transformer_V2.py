@@ -5,11 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Sequence
+import math
 
 import torch
 from torch import nn
 from einops import rearrange
 from einops.layers.torch import Rearrange, Reduce
+from torch import Tensor
+from torch.nn import functional as F
 
 
 class SpectrogramNorm(nn.Module):
@@ -301,7 +304,7 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(dropout)
         pe = torch.zeros(max_len, emb_size)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, emb_size, 2).float() * (-math.log(10000.0) / emb_size))
+        div_term = torch.exp(torch.arange(0, emb_size, 2).float() * (-torch.log(torch.tensor(10000.0)) / emb_size))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0)  # (1, max_len, emb_size)
@@ -316,6 +319,9 @@ class PositionalEncoding(nn.Module):
         """
         x = x + self.pe[:, :x.size(1)]
         return self.dropout(x)
+
+
+
 
 # Multi-Head Attention
 class MultiHeadAttention(nn.Module):
@@ -359,20 +365,35 @@ class ResidualAdd(nn.Module):
         return x + res
 
 # FeedForward Block
-class FeedForwardBlock(nn.Sequential):
-    def __init__(self, emb_size, expansion, drop_p):
-        super().__init__(
-            nn.Linear(emb_size, expansion * emb_size),
-            nn.GELU(),
-            nn.Dropout(drop_p),
-            nn.Linear(expansion * emb_size, emb_size)
-        )
+class FeedForwardBlockSwiGLU(nn.Module):
+    def __init__(self, emb_size, expansion=4, drop_p=0.5):
+        """
+        Args:
+          emb_size: input and output embedding dimension.
+          expansion: expansion factor (typically 4).
+          drop_p: dropout probability.
+        """
+        super().__init__()
+        inner_dim = expansion * emb_size
+        # Two linear layers for the SwiGLU branch
+        self.fc1 = nn.Linear(emb_size, inner_dim)
+        self.fc2 = nn.Linear(emb_size, inner_dim)
+        # Project back to emb_size
+        self.project = nn.Linear(inner_dim, emb_size)
+        self.dropout = nn.Dropout(drop_p)
+
+    def forward(self, x):
+        # Apply SwiGLU:
+        # Compute the SiLU activated branch and gate branch, then elementwise multiply.
+        x = F.silu(self.fc1(x)) * self.fc2(x)
+        x = self.dropout(x)
+        return self.project(x)
 
 # Transformer Encoder Block (Pre-norm Residual)
 class TransformerEncoderBlock(nn.Sequential):
     def __init__(self,
                  emb_size,
-                 num_heads=8,
+                 num_heads=4,
                  drop_p=0.5,
                  forward_expansion=4,
                  forward_drop_p=0.5):
@@ -384,7 +405,7 @@ class TransformerEncoderBlock(nn.Sequential):
             )),
             ResidualAdd(nn.Sequential(
                 nn.LayerNorm(emb_size),
-                FeedForwardBlock(emb_size, expansion=forward_expansion, drop_p=forward_drop_p),
+                FeedForwardBlockSwiGLU(emb_size, expansion=forward_expansion, drop_p=forward_drop_p),
                 nn.Dropout(drop_p)
             ))
         )
@@ -417,9 +438,9 @@ class ClassificationHead(nn.Module):
 
 # Conformer Model using Positional Encoding
 class Conformer(nn.Sequential):
-    def __init__(self, emb_size=512, depth=6, n_classes=4, dropout=0.1, max_len=5000):
+    def __init__(self, emb_size=768, depth=2, n_classes=4, dropout=0.5, max_len=5000):
         super().__init__(
-            PositionalEncoding(emb_size, dropout=dropout, max_len=max_len),
+            PositionalEncoding(emb_size, dropout=dropout,max_len=max_len),
             TransformerEncoder(depth, emb_size),
             ClassificationHead(emb_size, n_classes)
         ) #(Time, Batch, n_classes)

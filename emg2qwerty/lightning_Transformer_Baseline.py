@@ -21,13 +21,15 @@ from emg2qwerty import utils
 from emg2qwerty.charset import charset
 from emg2qwerty.data import LabelData, WindowedEMGDataset
 from emg2qwerty.metrics import CharacterErrorRates
-from emg2qwerty.modules import (
+from emg2qwerty.modules_Transformer_Baseline import (
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
     TDSConvEncoder,
+    Conformer,
+    PermuteLayer
 )
 from emg2qwerty.transforms import Transform
-from emg2qwerty.modules_trans import *
+from torch.nn import functional as F
 
 
 class WindowedEMGDataModule(pl.LightningDataModule):
@@ -90,9 +92,9 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                 WindowedEMGDataset(
                     hdf5_path,
                     transform=self.test_transform,
+                    window_length=self.window_length,
                     # Feed the entire session at once without windowing/padding
                     # at test time for more realism
-                    window_length=None,
                     padding=(0, 0),
                     jitter=False,
                 )
@@ -169,18 +171,18 @@ class TDSConvCTCModule(pl.LightningModule):
                 num_bands=self.NUM_BANDS,
             ),
             # (T, N, num_features)
-            nn.Flatten(start_dim=2),
-            TDSConvEncoder(
-                num_features=num_features,
-                block_channels=block_channels,
-                kernel_width=kernel_width,
-            ),
-            PermuteLayer(),
+            #nn.Flatten(start_dim=2),
+            #TDSConvEncoder(
+            #    num_features=num_features,
+            #    block_channels=block_channels,
+            #    kernel_width=kernel_width,
+            #),
+            # PermuteLayer(),
             # (N, T, num_features)
-            Conformer(emb_size=512, 
-                      depth=6, 
+            Conformer(emb_size=768, 
+                      depth=2, 
                       n_classes=charset().num_classes, 
-                      dropout=0.1, 
+                      dropout=0.3,
                       max_len=5000),
             # (T, N, num_classes)
             nn.LogSoftmax(dim=-1),

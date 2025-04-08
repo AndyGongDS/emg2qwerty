@@ -5,14 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Sequence
-import math
 
 import torch
 from torch import nn
-from einops import rearrange
-from einops.layers.torch import Rearrange, Reduce
-from torch import Tensor
-from torch.nn import functional as F
 
 
 class SpectrogramNorm(nn.Module):
@@ -22,7 +17,7 @@ class SpectrogramNorm(nn.Module):
 
     With left and right bands and 16 electrode channels per band, spectrograms
     corresponding to each of the 2 * 16 = 32 channels are normalized
-    independently using `nn.BatchNorm2d` such that stats are ctompued
+    independently using `nn.BatchNorm2d` such that stats are computed
     over (N, freq, time) slices.
 
     Args:
@@ -174,7 +169,6 @@ class MultiBandRotationInvariantMLP(nn.Module):
         return torch.stack(outputs_per_band, dim=self.stack_dim)
 
 
-
 class TDSConv2dBlock(nn.Module):
     """A 2D temporal convolution block as per "Sequence-to-Sequence Speech
     Recognition with Time-Depth Separable Convolutions, Hannun et al"
@@ -284,167 +278,3 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
-
-
-class PermuteLayer(nn.Module):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Converts (T, N, C) -> (N, T, C)
-        return x.permute(1, 0, 2)
-
-# Positional Encoding (sinusoidal)
-class PositionalEncoding(nn.Module):
-    def __init__(self, emb_size: int, dropout: float = 0.1, max_len: int = 5000):
-        """
-        Args:
-            emb_size (int): Embedding dimension.
-            dropout (float): Dropout rate.
-            max_len (int): Maximum sequence length.
-        """
-        super().__init__()
-        self.dropout = nn.Dropout(dropout)
-        pe = torch.zeros(max_len, emb_size)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, emb_size, 2).float() * (-torch.log(torch.tensor(10000.0)) / emb_size))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, emb_size)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Args:
-            x (Tensor): Input of shape (batch, seq_len, emb_size)
-        Returns:
-            Tensor: Output with positional encoding added.
-        """
-        x = x + self.pe[:, :x.size(1)]
-        return self.dropout(x)
-
-
-
-
-# Multi-Head Attention
-class MultiHeadAttention(nn.Module):
-    def __init__(self, emb_size, num_heads, dropout):
-        super().__init__()
-        self.emb_size = emb_size
-        self.num_heads = num_heads
-        self.keys = nn.Linear(emb_size, emb_size)
-        self.queries = nn.Linear(emb_size, emb_size)
-        self.values = nn.Linear(emb_size, emb_size)
-        self.att_drop = nn.Dropout(dropout)
-        self.projection = nn.Linear(emb_size, emb_size)
-
-    def forward(self, embedded_x: Tensor, mask: Tensor = None) -> Tensor:
-        # (batch, seq_len, emb_size) -> (batch, num_heads, seq_len, head_dim)
-        queries = rearrange(self.queries(embedded_x), "b n (h d) -> b h n d", h=self.num_heads)
-        keys    = rearrange(self.keys(embedded_x),    "b n (h d) -> b h n d", h=self.num_heads)
-        values  = rearrange(self.values(embedded_x),  "b n (h d) -> b h n d", h=self.num_heads)
-        
-        energy = torch.einsum("b h i d, b h j d -> b h i j", queries, keys)
-        if mask is not None:
-            fill_value = torch.finfo(torch.float32).min
-            energy = energy.masked_fill(~mask, fill_value)
-        head_dim = self.emb_size // self.num_heads
-        scaling = head_dim ** 0.5
-        att = F.softmax(energy / scaling, dim=-1)
-        att = self.att_drop(att)
-        out = torch.einsum("b h i j, b h j d -> b h i d", att, values)
-        out = rearrange(out, "b h n d -> b n (h d)")
-        return self.projection(out)
-
-# Residual connection wrapper
-class ResidualAdd(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-
-    def forward(self, x, **kwargs):
-        res = x
-        x = self.fn(x, **kwargs)
-        return x + res
-
-# FeedForward Block
-class FeedForwardBlockSwiGLU(nn.Module):
-    def __init__(self, emb_size, expansion=4, drop_p=0.5):
-        """
-        Args:
-          emb_size: input and output embedding dimension.
-          expansion: expansion factor (typically 4).
-          drop_p: dropout probability.
-        """
-        super().__init__()
-        inner_dim = expansion * emb_size
-        # Two linear layers for the SwiGLU branch
-        self.fc1 = nn.Linear(emb_size, inner_dim)
-        self.fc2 = nn.Linear(emb_size, inner_dim)
-        # Project back to emb_size
-        self.project = nn.Linear(inner_dim, emb_size)
-        self.dropout = nn.Dropout(drop_p)
-
-    def forward(self, x):
-        # Apply SwiGLU:
-        # Compute the SiLU activated branch and gate branch, then elementwise multiply.
-        x = F.silu(self.fc1(x)) * self.fc2(x)
-        x = self.dropout(x)
-        return self.project(x)
-
-# Transformer Encoder Block (Pre-norm Residual)
-class TransformerEncoderBlock(nn.Sequential):
-    def __init__(self,
-                 emb_size,
-                 num_heads=4,
-                 drop_p=0.5,
-                 forward_expansion=4,
-                 forward_drop_p=0.5):
-        super().__init__(
-            ResidualAdd(nn.Sequential(
-                nn.LayerNorm(emb_size),
-                MultiHeadAttention(emb_size, num_heads, drop_p),
-                nn.Dropout(drop_p)
-            )),
-            ResidualAdd(nn.Sequential(
-                nn.LayerNorm(emb_size),
-                FeedForwardBlockSwiGLU(emb_size, expansion=forward_expansion, drop_p=forward_drop_p),
-                nn.Dropout(drop_p)
-            ))
-        )
-
-# Transformer Encoder (stacking blocks)
-class TransformerEncoder(nn.Sequential):
-    def __init__(self, depth, emb_size):
-        super().__init__(*[TransformerEncoderBlock(emb_size) for _ in range(depth)])
-
-# Classification Head (per time-step classification)
-class ClassificationHead(nn.Module):
-    def __init__(self, emb_size, n_classes):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.LayerNorm(emb_size),
-            nn.Linear(emb_size, 256),
-            nn.LayerNorm(256),
-            nn.LeakyReLU(negative_slope=0.01),
-            nn.Dropout(0.1),
-            nn.Linear(256, n_classes)
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Args:
-            x (Tensor): Input tensor of shape (batch, seq_len, emb_size)
-        Returns:
-            Tensor: Output tensor of shape (Time, Batch, n_classes)
-        """
-        # Apply the classification projection to each time-step
-        out = self.proj(x)  # shape: (batch, seq_len, n_classes)
-        # Permute to (Time, Batch, n_classes)
-        return out.transpose(0, 1)
-
-# Conformer Model using Positional Encoding
-class Conformer(nn.Sequential):
-    def __init__(self, emb_size=768, depth=4, n_classes=4, dropout=0.15, max_len=5000):
-        super().__init__(
-            #PositionalEncoding(emb_size, dropout=dropout,max_len=max_len),
-            TransformerEncoder(depth, emb_size),
-            ClassificationHead(emb_size, n_classes)
-        ) #(Time, Batch, n_classes)

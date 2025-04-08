@@ -16,21 +16,20 @@ from omegaconf import DictConfig
 from torch import nn
 from torch.utils.data import ConcatDataset, DataLoader
 from torchmetrics import MetricCollection
-from torch.nn import functional as F
-# import tensor from torch
-
 
 from emg2qwerty import utils
 from emg2qwerty.charset import charset
 from emg2qwerty.data import LabelData, WindowedEMGDataset
 from emg2qwerty.metrics import CharacterErrorRates
-from emg2qwerty.modules import (
+from emg2qwerty.modules_TDS_Conv_Transformer_V2 import (
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
     TDSConvEncoder,
+    Conformer,
+    PermuteLayer
 )
 from emg2qwerty.transforms import Transform
-from emg2qwerty.modules_trans import *
+from torch.nn import functional as F
 
 
 class WindowedEMGDataModule(pl.LightningDataModule):
@@ -93,9 +92,9 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                 WindowedEMGDataset(
                     hdf5_path,
                     transform=self.test_transform,
+                    window_length=self.window_length,
                     # Feed the entire session at once without windowing/padding
                     # at test time for more realism
-                    window_length=None,
                     padding=(0, 0),
                     jitter=False,
                 )
@@ -181,9 +180,9 @@ class TDSConvCTCModule(pl.LightningModule):
             PermuteLayer(),
             # (N, T, num_features)
             Conformer(emb_size=768, 
-                      depth=6, 
+                      depth=2, 
                       n_classes=charset().num_classes, 
-                      dropout=0.1, 
+                      dropout=0.5,
                       max_len=5000),
             # (T, N, num_classes)
             nn.LogSoftmax(dim=-1),
